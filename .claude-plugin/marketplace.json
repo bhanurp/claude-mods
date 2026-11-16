@@ -1,0 +1,11 @@
+{
+  "name": "my-mods",
+  "owner": { "name": "bhanurp" },
+  "plugins": [
+    {
+      "name": "session-prs",
+      "source": "./session-prs",
+      "description": "Band above the prompt that tracks the PRs your session used, with status, CI, review and comments."
+    }
+  ]
+}

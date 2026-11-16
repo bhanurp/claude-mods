@@ -1,0 +1,4 @@
+.boost/
+node_modules/
+.DS_Store
+**/.claude-plugin/types/

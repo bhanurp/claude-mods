@@ -1,0 +1,27 @@
+{
+  "name": "session-prs",
+  "version": "0.1.0",
+  "license": "MIT",
+  "description": "Band above the prompt that tracks the PRs your session used, with status, CI, review and comments, and buttons to review, fix CI, copy and dismiss.",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "fixSkill": {
+      "type": "string",
+      "title": "Fix-CI skill",
+      "description": "Name of the skill to run on a PR whose CI fails, for example ci-fix. The fix CI button sends \"/<skill> <PR link>\". Leave empty to be told how to set it when you press the button.",
+      "default": ""
+    },
+    "reviewSkills": {
+      "type": "string",
+      "title": "Review skills",
+      "description": "Skills that review a PR, separated by commas, for example code-review, my-plugin:security-review. The review button runs each one on the PR, one after the other, sending \"/<skill> <PR link>\". Leave empty to be told how to set it when you press the button.",
+      "default": ""
+    },
+    "iconStyle": {
+      "type": "string",
+      "title": "Button style",
+      "description": "icons (default) draws Material Design icons from a Nerd Font, which Ghostty ships and other terminals need installed. words draws plain words instead.",
+      "default": "icons"
+    }
+  }
+}
