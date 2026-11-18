@@ -182,6 +182,49 @@ const hasLinks = async ($: EngineInterface, mode: string): Promise<boolean> => {
   )
 }
 
+// Cells in a string, counting a glyph once (a Nerd Font icon is two UTF-16 units).
+const cells = (text: string): number => [...text].length
+
+// Lines a text takes in a column of `width` cells: words wrap at spaces, and a
+// word longer than the column breaks.
+const wrapCount = (text: string, width: number): number => {
+  let lines = 1
+  let used = 0
+  for (const word of text.split(' ')) {
+    const n = cells(word)
+    if (n === 0) continue
+    if (used === 0) {
+      used = n
+    } else if (used + 1 + n <= width) {
+      used += 1 + n
+    } else {
+      lines += 1
+      used = n
+    }
+    while (used > width) {
+      lines += 1
+      used -= width
+    }
+  }
+  return lines
+}
+
+// Lines a wrapping row of boxes takes: each box stays whole and goes to the
+// next line when it does not fit.
+const flowCount = (sizes: number[], gap: number, width: number): number => {
+  let lines = 1
+  let used = 0
+  for (const n of sizes) {
+    if (used === 0) used = n
+    else if (used + gap + n <= width) used += gap + n
+    else {
+      lines += 1
+      used = n
+    }
+  }
+  return lines
+}
+
 type Api = EngineInterface
 
 const toStatus = (state: string, isDraft: boolean): string => {
@@ -741,65 +784,121 @@ export const register: Register = (on, options) => {
     // is as wide as its widest cell, with room between. When the band is too
     // narrow the loose gap tightens, then the flexible columns shrink, then
     // each PR is stacked in two lines.
+    const msg = await read($, notice)
+    // A message that says something is wrong shows in red. Others in green.
+    const isProblem = PROBLEMS.some(w => msg.startsWith(w))
     const cols = Math.max(30, e.props.bodyColumns)
     const inner = cols - 2 // inside the table's border
-    const need: Record<Column, number> = {} as Record<Column, number>
-    for (const c of COLUMNS) need[c] = HEAD[c].length
-    for (const pr of rows) {
-      const bump = (c: Column, n: number) => {
-        need[c] = Math.max(need[c], n)
+    // When every PR is under one owner, the owner can be left off the repo.
+    const owner = rows[0]?.repo.split('/')[0] ?? ''
+    const isSameOwner = rows.length > 0 && rows.every(p => p.repo.split('/')[0] === owner)
+    const build = (strip: boolean) => {
+      const repoText = (pr: Pr) => (strip ? pr.repo.slice(owner.length + 1) : pr.repo)
+      const need: Record<Column, number> = {} as Record<Column, number>
+      for (const c of COLUMNS) need[c] = HEAD[c].length
+      for (const pr of rows) {
+        const bump = (c: Column, n: number) => {
+          need[c] = Math.max(need[c], n)
+        }
+        bump('repo', repoText(pr).length)
+        bump('num', `#${pr.num}`.length)
+        bump('status', pr.status.length + 4)
+        bump('merge', (MERGE_VIEW[pr.merge]?.[0].length ?? 0) + 4)
+        bump('ci', CI_VIEW[pr.ci]?.[0].length ?? 0)
+        bump('review', REVIEW_VIEW[pr.review]?.[0].length ?? 0)
+        bump('comments', pr.unresolved > 0 ? `✎ ${pr.unresolved} open`.length : 6)
       }
-      bump('repo', pr.repo.length)
-      bump('num', `#${pr.num}`.length)
-      bump('status', pr.status.length + 4)
-      bump('merge', (MERGE_VIEW[pr.merge]?.[0].length ?? 0) + 4)
-      bump('ci', CI_VIEW[pr.ci]?.[0].length ?? 0)
-      bump('review', REVIEW_VIEW[pr.review]?.[0].length ?? 0)
-      bump('comments', pr.unresolved > 0 ? `✎ ${pr.unresolved} open`.length : 6)
-    }
-    const widths = { ...need }
-    const sumOf = () => COLUMNS.reduce((n, c) => n + widths[c], 0) + ACTIONS_W
-    let gap = 2
-    if (sumOf() + gap * 7 > inner) gap = 1
-    const excess = sumOf() + gap * 7 - inner
-    const flexKeys = ['repo', 'merge', 'review'] as const
-    const give = (k: (typeof flexKeys)[number]) => widths[k] - FLEX_MIN[k]
-    const room = flexKeys.reduce((n, k) => n + Math.max(0, give(k)), 0)
-    const isTable = excess <= room
-    if (excess > 0 && isTable) {
-      let left = excess
-      for (const k of flexKeys) {
-        const cut = Math.min(Math.max(0, give(k)), Math.ceil((excess * Math.max(0, give(k))) / room))
-        widths[k] -= Math.min(cut, left)
-        left -= Math.min(cut, left)
+      const widths = { ...need }
+      const sumOf = () => COLUMNS.reduce((n, c) => n + widths[c], 0) + ACTIONS_W
+      let gap = 2
+      if (sumOf() + gap * 7 > inner) gap = 1
+      const excess = sumOf() + gap * 7 - inner
+      // Squeeze what wraps at spaces first. The repo goes last, as a name that
+      // is too wide breaks in the middle of a word.
+      const order = ['merge', 'review', 'repo'] as const
+      const give = (k: (typeof order)[number]) => Math.max(0, widths[k] - FLEX_MIN[k])
+      const isTable = excess <= order.reduce((n, k) => n + give(k), 0)
+      if (excess > 0 && isTable) {
+        let left = excess
+        for (const k of order) {
+          const cut = Math.min(give(k), left)
+          widths[k] -= cut
+          left -= cut
+        }
+      }
+      return {
+        repoText,
+        widths,
+        gap,
+        isTable,
+        isRepoWhole: widths.repo >= need.repo,
+        tableW: sumOf() + gap * 7,
       }
     }
+    let layout = build(false)
+    if (!layout.isRepoWhole && isSameOwner) layout = build(true)
+    const { repoText, widths, gap, isTable, tableW } = layout
     const repoW = isTable
       ? widths.repo
       : Math.max(8, inner - 6 - 10 - ACTIONS_W - 3)
-    const tableW = sumOf() + gap * 7
 
     // Lines a PR takes: text that is wider than its column wraps inside it.
-    const lines = (n: number, w: number) => Math.max(1, Math.ceil(n / w))
+    const lines = (text: string, w: number) => wrapCount(text, w)
     const rowHeight = (pr: Pr): number =>
       !isTable
         ? 2
         : Math.max(
-            lines(pr.repo.length, widths.repo),
-            lines((MERGE_VIEW[pr.merge]?.[0].length ?? 0) + 4, widths.merge),
-            lines(REVIEW_VIEW[pr.review]?.[0].length ?? 0, widths.review),
+            lines(repoText(pr), widths.repo),
+            lines(` ${MERGE_VIEW[pr.merge]?.[1] ?? ''} ${MERGE_VIEW[pr.merge]?.[0] ?? ''} `, widths.merge),
+            lines(REVIEW_VIEW[pr.review]?.[0] ?? '', widths.review),
           )
     // The engine counts rows it cannot fit as "n more" lines, not PRs. Fit the
     // tree to the band ourselves, and say how many PRs are not shown.
+    const pillW = (name: IconName, text: string = LABEL[name]) =>
+      cells(text) + 2
+    const topSizes = [
+      pillW('hide'),
+      pillW('refresh'),
+      ...(mergedCount > 0 ? [pillW('dismiss', `${LABEL.dismiss} merged ${mergedCount}`)] : []),
+      11, // Session PRs
+      ...(msg === '' ? [] : [cells(msg)]),
+    ]
+    const chipW = (label: string) => cells(label) + 2
+    const authorSizes = [
+      ...(notAway.length > 0
+        ? [7, chipW(`mine ${notAway.length - notMine}`), chipW(`everyone ${notAway.length}`)]
+        : []),
+      ...(list.length > 0
+        ? [
+            1,
+            5,
+            chipW(`all ${list.length}`),
+            ...STATUS_ORDER.filter(st => (counts.get(st) ?? 0) > 0).map(st =>
+              chipW(`${STATUS_ICON[st]} ${st} ${counts.get(st)}`),
+            ),
+          ]
+        : []),
+    ]
+    const needsSizes =
+      list.length > 0
+        ? [
+            6,
+            chipW('any'),
+            ...ATTN_ORDER.filter(k => (attnCounts.get(k) ?? 0) > 0).map(k =>
+              chipW(`${ATTN[k]?.icon ?? ''} ${ATTN[k]?.label ?? k} ${attnCounts.get(k)}`),
+            ),
+          ]
+        : []
     const chromeRows =
-      1 + // top buttons
-      (notAway.length > 0 || list.length > 0 ? 1 : 0) + // Author and Show
-      (list.length > 0 ? 3 : 0) + // Needs, table border
+      flowCount(topSizes, 2, cols) +
+      (authorSizes.length > 0 ? flowCount(authorSizes, 1, cols) : 0) +
+      (needsSizes.length > 0 ? flowCount(needsSizes, 1, cols) : 0) +
+      (list.length > 0 ? 2 : 0) + // table border
       (list.length > 0 && isTable ? 2 : 0) + // column heads, divider
-      1 + // a filter row that wraps
       (hiddenCount > 0 && list.length > 0 ? 1 : 0) + // dismissed hint
-      1 // "more PRs" line
-    const budget = Math.max(2, e.props.maxRows - chromeRows)
+      1 + // "more PRs" line
+      1 // spare line, so the band is never taller than the room it has
+    const budget = Math.max(1, e.props.maxRows - chromeRows)
     const shownRows: Pr[] = []
     let used = 0
     for (const pr of rows) {
@@ -809,39 +908,55 @@ export const register: Register = (on, options) => {
       used += h
     }
     const cutRows = rows.length - shownRows.length
-    const msg = await read($, notice)
-    // A message that says something is wrong shows in red. Others in green.
-    const isProblem = PROBLEMS.some(w => msg.startsWith(w))
 
     // Ask Claude to run each skill on one PR, one after the other. Each is a
     // prompt of its own, sent once the one before it is done.
     const runSkills = async (pr: Pr, skills: string[], setting: string) => {
+      // Say it in the band and as a toast. The band can be scrolled so its top
+      // row is out of view; a toast shows wherever the band is.
+      const say = async (text: string) => {
+        await update($, notice, () => text)
+        await $.ui.toast(text)
+      }
       if (skills.length === 0) {
-        await update($, notice, () =>
-          `No skill set. Open /plugin, pick session-prs, and set "${setting}".`,
-        )
+        await say(`No skill set. Open /plugin, pick session-prs, and set "${setting}".`)
         return
       }
       const bad = skills.filter(k => !SKILL_NAME.test(k))
       if (bad.length > 0) {
-        await update($, notice, () =>
-          `Not a valid skill name: ${bad.join(', ')}. Use letters, digits, - _ and :.`,
-        )
+        await say(`Not a valid skill name: ${bad.join(', ')}. Use letters, digits, - _ and :.`)
         return
       }
-      // Send each as the person's own words, so it reads in this session as a
-      // prompt they typed. When Claude is busy it waits its turn in the queue.
+      // Run each as a slash command, as if the person typed `/skill <link>`.
+      // A prompt that merely starts with "/" is plain text to the engine, so the
+      // skill would never run. When Claude is busy, the run waits its turn.
       const label = `${pr.repo}#${pr.num}`
+      const names = skills.map(k => `/${k}`).join(', ')
+      await say(`Running ${names} on ${label}...`)
+      // A skill the engine lists as a command runs as one. Any other name is
+      // asked of Claude in words, which uses the skill by name.
+      const listed = await $.command.list().then(
+        list => list.map(c => c.name),
+        () => [] as string[],
+      )
       for (const k of skills) {
-        const sent = await $.prompt.submit({ text: `/${k} ${pr.url}`, asUser: true })
-        if (sent.drop !== undefined) {
-          await update($, notice, () => `Not sent: /${k} on ${label}. ${String(sent.drop)}`)
+        try {
+          if (listed.length === 0 || listed.includes(k)) {
+            await $.command.run({ command: k, args: pr.url })
+          } else {
+            const sent = await $.prompt.submit({
+              text: `Use the ${k} skill on this pull request: ${pr.url}`,
+              asUser: true,
+            })
+            if (sent.drop !== undefined) throw new Error(String(sent.drop))
+          }
+        } catch (err) {
+          const why = err instanceof Error ? err.message : String(err)
+          await say(`Not sent: /${k} on ${label}. ${why}`)
           return
         }
       }
-      await update($, notice, () =>
-        `Sent ${skills.map(k => `/${k}`).join(', ')} on ${label} to this session.`,
-      )
+      await update($, notice, () => `Ran ${names} on ${label}.`)
     }
 
     // One table cell. A fixed width that never shrinks: text wraps inside it.
@@ -909,9 +1024,9 @@ export const register: Register = (on, options) => {
           )}
         </Box>
         {(notAway.length > 0 || list.length > 0) && (
-          <Box flexDirection="row" gap={1}>
+          <Box flexDirection="row" flexWrap="wrap" columnGap={1}>
             {notAway.length > 0 && (
-              <Text color={AUTHOR_COLOR.off} bold>
+              <Text color={AUTHOR_COLOR.off} bold wrap="truncate">
                 Author:
               </Text>
             )}
@@ -957,8 +1072,8 @@ export const register: Register = (on, options) => {
           </Box>
         )}
         {list.length > 0 && (
-          <Box flexDirection="row" gap={1}>
-            <Text color={NEEDS_COLOR.off} bold>
+          <Box flexDirection="row" flexWrap="wrap" columnGap={1}>
+            <Text color={NEEDS_COLOR.off} bold wrap="truncate">
               Needs:
             </Text>
             {chip('attn-none', 'any', activeAttn === '', NEEDS_COLOR, () =>
@@ -1005,7 +1120,7 @@ export const register: Register = (on, options) => {
               const repoCell = cell(
                 repoW,
                 link(pr.url, <Text color={REPO_COLOR} bold>
-                    {pr.repo}
+                    {repoText(pr)}
                   </Text>),
               )
               const numCell = cell(
