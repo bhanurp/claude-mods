@@ -1,6 +1,6 @@
 {
   "name": "session-prs",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "license": "MIT",
   "description": "Band above the prompt that tracks the PRs your session used, with status, CI, review and comments, and buttons to review, fix CI, copy and dismiss.",
   "types": "./types/index.d.ts",

@@ -195,6 +195,7 @@ const MERGE_VIEW: Record<string, [string, string, string]> = {
   ready: ['ready', '✔', '#238636'],
   conflicts: ['conflicts', '✖', '#da3633'],
   checks: ['checks failing', '✖', '#da3633'],
+  pending: ['checks pending', '…', '#9e6a03'],
   behind: ['behind base', '↓', '#9e6a03'],
   blocked: ['blocked', '■', '#9e6a03'],
   draft: ['draft', '○', '#6e7681'],
@@ -255,8 +256,12 @@ const toMerge = (v: View): string => {
     case 'CLEAN':
     case 'HAS_HOOKS':
       return 'ready'
-    case 'UNSTABLE':
-      return 'checks'
+    case 'UNSTABLE': {
+      // GitHub's UNSTABLE covers failing checks and checks still running.
+      // Say which, from the checks themselves.
+      const ci = toCi(v)
+      return ci === 'failing' ? 'checks' : ci === 'running' ? 'pending' : 'checking'
+    }
     case 'BEHIND':
       return 'behind'
     case 'BLOCKED':

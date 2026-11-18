@@ -36,7 +36,7 @@ Optional, for the best look:
 - **A Nerd Font** draws the button icons (eye, wrench, copy, close). Ghostty has one built in. In other terminals, install one from <https://www.nerdfonts.com> and select it as the terminal font. Without one the icons show as empty boxes. Then open `/plugin`, pick `session-prs`, and set `Button style` to `words`.
 - **A terminal that draws links** makes the repo, number, status and CI clickable. Ghostty, iTerm2, WezTerm, kitty, Alacritty and the VS Code terminal do. macOS Terminal does not, so the mod shows plain text there. Use the `copy` button to get a PR link. `Clickable links` in `/plugin` is `auto` by default. Set it to `on` or `off` to force it.
 
-Each row shows the repo, the PR number, the status (open, draft, merged, closed), whether it can merge (ready, conflicts, checks failing, behind, blocked) the review state, and how many review comment threads are still unresolved (read through the GitHub GraphQL API with `gh api`, first 100 threads). The repo, number, status and merge badge are links that open the PR. The list refreshes every minute and after `git push` or a `gh pr` command.
+Each row shows the repo, the PR number, the status (open, draft, merged, closed), whether it can merge (ready, conflicts, checks failing, checks pending, behind, blocked) the review state, and how many review comment threads are still unresolved (read through the GitHub GraphQL API with `gh api`, first 100 threads). The repo, number, status and merge badge are links that open the PR. The list refreshes every minute and after `git push` or a `gh pr` command.
 
 It tracks only the PRs the session used or you asked about. A PR is added when:
 
