@@ -11,9 +11,11 @@ import type { Pr } from '../types'
 const REFRESH_MS = 60_000
 const MAX_PRS = 100
 // Any GitHub host (github.com, GHES): https://host/owner/repo/pull/123
-const PR_URL = /https?:\/\/([^\s/]+)\/([^\s/]+\/[^\s/]+)\/pull\/(\d+)/g
+const PR_URL = /https?:\/\/([^\s/\\"']+)\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)/g
 // API path: repos/owner/name/pulls/12
-const API_PR = /\brepos\/([^\s/"']+)\/([^\s/"']+)\/pulls\/(\d+)/g
+const API_PR = /\brepos\/([\w.-]+)\/([\w.-]+)\/pulls\/(\d+)/g
+// A PR link as the mod keeps it. Anything else (a stray backslash, a quote) is not a PR.
+const OK_URL = /^https?:\/\/[^\s/\\"']+\/[\w.-]+\/[\w.-]+\/pull\/\d+$/
 // The host an API URL names: https://api.github.com/... or https://host/api/v3/...
 const API_HOST = /https?:\/\/api\.([^\s/]+)\/repos\/|https?:\/\/([^\s/]+)\/api\/v3\/repos\//
 // Commands that list many PRs: what they print is not this session's work.
@@ -407,7 +409,7 @@ const fetchStatus = async (
 // refresh says so when a PR could not be read, so old numbers are never passed
 // off as fresh.
 const refreshAll = async ($: Api, isManual = false): Promise<void> => {
-  const list = await read($, prs)
+  const list = (await read($, prs)).filter(p => OK_URL.test(p.url))
   const live = list.filter(p => p.status !== 'merged' && p.status !== 'closed')
   const found = await Promise.all(
     live.map(async p => [p.url, await fetchStatus($, p.url)] as const),
@@ -415,8 +417,8 @@ const refreshAll = async ($: Api, isManual = false): Promise<void> => {
   const next = new Map(found)
   await update($, prs, all =>
     all
-      // An issue that was taken for a PR: drop it.
-      .filter(p => next.get(p.url) !== NOT_PR)
+      // A link that is not a PR, or an issue taken for one: drop it.
+      .filter(p => OK_URL.test(p.url) && next.get(p.url) !== NOT_PR)
       .map(p => {
         const fresh = next.get(p.url)
         return fresh === undefined || fresh === NOT_PR || isFailed(fresh)
@@ -424,13 +426,12 @@ const refreshAll = async ($: Api, isManual = false): Promise<void> => {
           : { ...p, ...fresh }
       }),
   )
-  const failed = found.flatMap(([url, r]) => (isFailed(r) ? [{ url, why: r.error }] : []))
-  if (failed.length > 0) {
-    const first = failed[0]
-    const name = first === undefined ? '' : first.url.replace(/^https?:\/\/[^/]+\//, '')
-    await update($, notice, () =>
-      `Could not refresh ${failed.length} of ${live.length} PR(s). Numbers shown may be old. ${name}: ${first?.why ?? ''}`,
-    )
+  // Quiet in the background. A press of refresh says what happened, briefly.
+  const failed = found.filter(([, r]) => isFailed(r)).length
+  if (failed > 0) {
+    if (isManual) {
+      await update($, notice, () => `Could not read ${failed} of ${live.length} PR(s). Showing old numbers.`)
+    }
   } else if (isManual) {
     const now = new Date()
     const pad = (n: number) => String(n).padStart(2, '0')
@@ -460,7 +461,9 @@ const hostOf = async ($: Api): Promise<string> => {
 }
 
 // PRs named in text: a PR link, or an API path such as repos/o/r/pulls/12.
-const findPrs = (text: string, fallbackHost: string): Pr[] => {
+const findPrs = (raw: string, fallbackHost: string): Pr[] => {
+  // Text copied from JSON writes / as \/.
+  const text = raw.replaceAll('\\/', '/')
   const found: Pr[] = []
   let host = fallbackHost
   for (const m of text.matchAll(PR_URL)) {
@@ -549,7 +552,7 @@ const addPrs = async ($: Api, found: Pr[]): Promise<number> => {
     const known = new Set(all.map(p => p.url))
     const fresh: Pr[] = []
     for (const pr of found) {
-      if (known.has(pr.url)) continue
+      if (!OK_URL.test(pr.url) || known.has(pr.url)) continue
       known.add(pr.url)
       fresh.push(pr)
     }
@@ -589,7 +592,7 @@ const parseSkills = (value: unknown): string[] => {
 }
 
 // Messages that start this way are problems, drawn in red.
-const PROBLEMS = ['No skill set', 'Not a valid skill name', 'Not sent', 'Could not refresh']
+const PROBLEMS = ['No skill set', 'Not a valid skill name', 'Not sent', 'Could not read']
 
 // A skill name: letters, digits, dash, underscore, colon (plugin:skill).
 const SKILL_NAME = /^[A-Za-z0-9][A-Za-z0-9:_-]*$/
