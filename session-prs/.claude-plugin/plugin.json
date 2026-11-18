@@ -1,6 +1,6 @@
 {
   "name": "session-prs",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "license": "MIT",
   "description": "Band above the prompt that tracks the PRs your session used, with status, CI, review and comments, and buttons to review, fix CI, copy and dismiss.",
   "types": "./types/index.d.ts",
@@ -22,6 +22,12 @@
       "title": "Button style",
       "description": "icons (default) draws Material Design icons from a Nerd Font, which Ghostty ships and other terminals need installed. words draws plain words instead.",
       "default": "icons"
+    },
+    "links": {
+      "type": "string",
+      "title": "Clickable links",
+      "description": "auto (default) makes the repo, PR number, status and CI clickable only in terminals that support links (Ghostty, iTerm2, WezTerm, VS Code, kitty and others). Other terminals, such as macOS Terminal, would print each full URL under the text, so auto draws plain text there. Set on or off to force it.",
+      "default": "auto"
     }
   }
 }

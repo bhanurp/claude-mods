@@ -158,6 +158,28 @@ const ICON_COLOR = {
 }
 type IconName = keyof typeof ICON
 
+// Terminals that draw clickable links (OSC 8). Where a terminal cannot, the
+// engine writes the whole URL after the text, which wrecks the table. So
+// links are drawn only where they work.
+const LINK_TERMS = [
+  'ghostty', 'iTerm.app', 'WezTerm', 'vscode', 'kitty', 'Hyper', 'WarpTerminal',
+  'rio', 'alacritty', 'contour', 'foot', 'tabby',
+]
+const hasLinks = async ($: EngineInterface, mode: string): Promise<boolean> => {
+  if (mode === 'on') return true
+  if (mode === 'off') return false
+  const program = (await $.env.get('TERM_PROGRAM')) ?? ''
+  const term = (await $.env.get('TERM')) ?? ''
+  const vte = (await $.env.get('VTE_VERSION')) ?? ''
+  const wt = (await $.env.get('WT_SESSION')) ?? ''
+  return (
+    LINK_TERMS.some(t => t.toLowerCase() === program.toLowerCase()) ||
+    /kitty|alacritty|foot|wezterm/i.test(term) ||
+    vte !== '' ||
+    wt !== ''
+  )
+}
+
 type Api = EngineInterface
 
 const toStatus = (state: string, isDraft: boolean): string => {
@@ -326,25 +348,43 @@ const toMine = (author: string, viewer: string): string =>
       ? 'yes'
       : 'no'
 
-const viewPr = async ($: Api, url: string, fields: string): Promise<View | undefined> => {
+// What `gh` says when the number is an issue, or nothing at all. GitHub opens
+// /pull/N as /issues/N for an issue, so such a link must not be tracked.
+const NOT_A_PR = /could not resolve to a pullrequest|no pull requests? found|not a pull request/i
+const NOT_PR = 'not-pr'
+
+const viewPr = async (
+  $: Api,
+  url: string,
+  fields: string,
+): Promise<View | typeof NOT_PR | { error: string }> => {
   const out = await $.process.run(
     ['gh', 'pr', 'view', url, '--json', fields],
     { timeoutMs: 20_000 },
   )
-  if (out.exitCode !== 0) return undefined
+  if (out.exitCode !== 0) {
+    if (NOT_A_PR.test(out.stderr)) return NOT_PR
+    const reason = out.stderr.trim().split('\n')[0] ?? ''
+    return { error: reason === '' ? `gh exited ${out.exitCode}` : reason }
+  }
   return JSON.parse(out.stdout) as View
 }
 
+const isFailed = (v: unknown): v is { error: string } =>
+  typeof v === 'object' && v !== null && 'error' in v
+
 // Ask `gh` for the state of one PR. Returns the new values, or undefined.
 // Falls back to fewer fields for a host that lacks the merge fields.
-const fetchStatus = async ($: Api, url: string): Promise<Fresh | undefined> => {
+const fetchStatus = async (
+  $: Api,
+  url: string,
+): Promise<Fresh | typeof NOT_PR | { error: string }> => {
   try {
     const fields = 'state,isDraft,author,mergeable,mergeStateStatus,reviewDecision'
-    const data =
-      (await viewPr($, url, `${fields},statusCheckRollup`)) ??
-      (await viewPr($, url, fields)) ??
-      (await viewPr($, url, 'state,isDraft,author'))
-    if (data === undefined) return undefined
+    let data = await viewPr($, url, `${fields},statusCheckRollup`)
+    if (isFailed(data)) data = await viewPr($, url, fields)
+    if (isFailed(data)) data = await viewPr($, url, 'state,isDraft,author')
+    if (isFailed(data) || data === NOT_PR) return data
     return {
       status: toStatus(data.state, data.isDraft),
       merge: toMerge(data),
@@ -353,12 +393,15 @@ const fetchStatus = async ($: Api, url: string): Promise<Fresh | undefined> => {
       mine: toMine(data.author?.login ?? '', await viewerOf($, url)),
       unresolved: data.state === 'OPEN' ? await fetchUnresolved($, url) : -1,
     }
-  } catch {
-    return undefined
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) }
   }
 }
 
-const refreshAll = async ($: Api): Promise<void> => {
+// Read every open PR again. A manual refresh says what happened, and any
+// refresh says so when a PR could not be read, so old numbers are never passed
+// off as fresh.
+const refreshAll = async ($: Api, isManual = false): Promise<void> => {
   const list = await read($, prs)
   const live = list.filter(p => p.status !== 'merged' && p.status !== 'closed')
   const found = await Promise.all(
@@ -366,11 +409,29 @@ const refreshAll = async ($: Api): Promise<void> => {
   )
   const next = new Map(found)
   await update($, prs, all =>
-    all.map(p => {
-      const fresh = next.get(p.url)
-      return fresh === undefined ? p : { ...p, ...fresh }
-    }),
+    all
+      // An issue that was taken for a PR: drop it.
+      .filter(p => next.get(p.url) !== NOT_PR)
+      .map(p => {
+        const fresh = next.get(p.url)
+        return fresh === undefined || fresh === NOT_PR || isFailed(fresh)
+          ? p
+          : { ...p, ...fresh }
+      }),
   )
+  const failed = found.flatMap(([url, r]) => (isFailed(r) ? [{ url, why: r.error }] : []))
+  if (failed.length > 0) {
+    const first = failed[0]
+    const name = first === undefined ? '' : first.url.replace(/^https?:\/\/[^/]+\//, '')
+    await update($, notice, () =>
+      `Could not refresh ${failed.length} of ${live.length} PR(s). Numbers shown may be old. ${name}: ${first?.why ?? ''}`,
+    )
+  } else if (isManual) {
+    const now = new Date()
+    const pad = (n: number) => String(n).padStart(2, '0')
+    const time = `${pad(now.getHours())}:${pad(now.getMinutes())}`
+    await update($, notice, () => `Refreshed ${live.length} PR(s) at ${time}.`)
+  }
 }
 
 // Status is `unknown` until the first `gh pr view` answers.
@@ -523,7 +584,7 @@ const parseSkills = (value: unknown): string[] => {
 }
 
 // Messages that start this way are problems, drawn in red.
-const PROBLEMS = ['No skill set', 'Not a valid skill name']
+const PROBLEMS = ['No skill set', 'Not a valid skill name', 'Not sent', 'Could not refresh']
 
 // A skill name: letters, digits, dash, underscore, colon (plugin:skill).
 const SKILL_NAME = /^[A-Za-z0-9][A-Za-z0-9:_-]*$/
@@ -538,6 +599,8 @@ export const register: Register = (on, options) => {
   const LABEL = useWords ? WORD : ICON
   const SLOT = useWords ? SLOT_WORDS : SLOT_ICONS
   const ACTIONS_W = slotsWidth(SLOT)
+  // auto (default): links where the terminal draws them. on / off to force.
+  const linkMode = String(options.links ?? 'auto').trim().toLowerCase()
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -619,6 +682,10 @@ export const register: Register = (on, options) => {
     if (e.props.hasSurvey) return next(e)
 
     const { Box, Text, Link, Button } = $.ui.resolve(e)
+    const linksOn = await hasLinks($, linkMode)
+    // A link where the terminal draws it, else the text alone.
+    const link = (href: string, node: RenderChildren) =>
+      linksOn ? <Link href={href}>{node}</Link> : node
     const all = await read($, prs)
     const away = await read($, dismissed)
     const notAway = all.filter(p => !away.includes(p.url))
@@ -754,10 +821,19 @@ export const register: Register = (on, options) => {
         )
         return
       }
+      // Send each as the person's own words, so it reads in this session as a
+      // prompt they typed. When Claude is busy it waits its turn in the queue.
+      const label = `${pr.repo}#${pr.num}`
+      for (const k of skills) {
+        const sent = await $.prompt.submit({ text: `/${k} ${pr.url}`, asUser: true })
+        if (sent.drop !== undefined) {
+          await update($, notice, () => `Not sent: /${k} on ${label}. ${String(sent.drop)}`)
+          return
+        }
+      }
       await update($, notice, () =>
-        `Asked Claude to run ${skills.map(k => `/${k}`).join(', ')} on ${pr.repo}#${pr.num}.`,
+        `Sent ${skills.map(k => `/${k}`).join(', ')} on ${label} to this session.`,
       )
-      for (const k of skills) await $.prompt.submit({ text: `/${k} ${pr.url}` })
     }
 
     // One table cell. A fixed width that never shrinks: text wraps inside it.
@@ -798,7 +874,7 @@ export const register: Register = (on, options) => {
           <Button key="hide" plain onPress={() => update($, isShown, () => false)}>
             {icon('hide')}
           </Button>
-          <Button key="refresh" plain onPress={() => refreshAll($)}>
+          <Button key="refresh" plain onPress={() => refreshAll($, true)}>
             {icon('refresh')}
           </Button>
           {mergedCount > 0 && (
@@ -920,47 +996,37 @@ export const register: Register = (on, options) => {
               const review = REVIEW_VIEW[pr.review]
               const repoCell = cell(
                 repoW,
-                <Link href={pr.url}>
-                  <Text color={REPO_COLOR} bold>
+                link(pr.url, <Text color={REPO_COLOR} bold>
                     {pr.repo}
-                  </Text>
-                </Link>,
+                  </Text>),
               )
               const numCell = cell(
                 widths.num,
-                <Link href={pr.url}>
-                  <Text color={NUM_COLOR} bold underline>
+                link(pr.url, <Text color={NUM_COLOR} bold underline>
                     {`#${pr.num}`}
-                  </Text>
-                </Link>,
+                  </Text>),
               )
               const statusCell = cell(
                 widths.status,
-                <Link href={pr.url}>
-                  <Text
+                link(pr.url, <Text
                     backgroundColor={STATUS_COLOR[pr.status] ?? UNKNOWN_COLOR}
                     color="#ffffff"
                     bold
                   >
                     {` ${STATUS_ICON[pr.status] ?? '?'} ${pr.status} `}
-                  </Text>
-                </Link>,
+                  </Text>),
               )
               const mergeNode = merge ? (
-                <Link href={pr.url}>
-                  <Text backgroundColor={merge[2]} color="#ffffff" bold>
+                link(pr.url, <Text backgroundColor={merge[2]} color="#ffffff" bold>
                     {` ${merge[1]} ${merge[0]} `}
-                  </Text>
-                </Link>
+                  </Text>)
               ) : (
                 <Text dimColor>-</Text>
               )
               const ciNode = ci ? (
-                <Link href={`${pr.url}/checks`}>
-                  <Text color={ci[1]} bold>
+                link(`${pr.url}/checks`, <Text color={ci[1]} bold>
                     {ci[0]}
-                  </Text>
-                </Link>
+                  </Text>)
               ) : (
                 <Text dimColor>-</Text>
               )
@@ -973,11 +1039,9 @@ export const register: Register = (on, options) => {
               )
               const commentsNode =
                 pr.unresolved > 0 ? (
-                  <Link href={pr.url}>
-                    <Text color="#d29922" bold>
+                  link(pr.url, <Text color="#d29922" bold>
                       {`✎ ${pr.unresolved} open`}
-                    </Text>
-                  </Link>
+                    </Text>)
                 ) : pr.unresolved === 0 ? (
                   <Text color="#3fb950">✔ none</Text>
                 ) : (

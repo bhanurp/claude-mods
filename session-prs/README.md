@@ -18,6 +18,24 @@ claude plugin install session-prs --marketplace bhanurp/claude-mods
 
 Answer `y` to add the marketplace, then pick a scope.
 
+## Prerequisites
+
+Required:
+
+| Need | Why | Check |
+|---|---|---|
+| **Claude Code** with mods, in a terminal or the desktop app | The band shows on those two only. | `claude --version` |
+| **GitHub CLI (`gh`)** on your `PATH` | The mod reads PR state with `gh pr view` and `gh api`. It does not work without it. | `gh --version` |
+| **A `gh` login** that can read the repos you open PRs in | Without it, PRs show no status. | `gh auth status` |
+| **PR links in the session** | The mod tracks only PRs a command names, a `gh pr` command prints, or you write. A `gh pr view 12` with no `--repo` is not found. | |
+
+Install `gh`: `brew install gh` (macOS), `winget install --id GitHub.cli` (Windows), or see <https://cli.github.com>. Sign in with `gh auth login`. For GitHub Enterprise Server, use `gh auth login --hostname <host>`.
+
+Optional, for the best look:
+
+- **A Nerd Font** draws the button icons (eye, wrench, copy, close). Ghostty has one built in. In other terminals, install one from <https://www.nerdfonts.com> and select it as the terminal font. Without one the icons show as empty boxes. Then open `/plugin`, pick `session-prs`, and set `Button style` to `words`.
+- **A terminal that draws links** makes the repo, number, status and CI clickable. Ghostty, iTerm2, WezTerm, kitty, Alacritty and the VS Code terminal do. macOS Terminal does not, so the mod shows plain text there. Use the `copy` button to get a PR link. `Clickable links` in `/plugin` is `auto` by default. Set it to `on` or `off` to force it.
+
 Each row shows the repo, the PR number, the status (open, draft, merged, closed), whether it can merge (ready, conflicts, checks failing, behind, blocked) the review state, and how many review comment threads are still unresolved (read through the GitHub GraphQL API with `gh api`, first 100 threads). The repo, number, status and merge badge are links that open the PR. The list refreshes every minute and after `git push` or a `gh pr` command.
 
 It tracks only the PRs the session used or you asked about. A PR is added when:
@@ -28,17 +46,9 @@ It tracks only the PRs the session used or you asked about. A PR is added when:
 
 These are not added: links Claude writes in its replies, other command output, results from connected servers, and commands that list many PRs (`gh pr list`, `gh pr status`, `gh search`). If a PR you do not need still shows, press `dismiss` on its row.
 
+Only real pull requests stay. GitHub opens a `/pull/N` link as an issue when N is an issue. The mod checks each link with `gh`, and drops any that is an issue (or does not exist) on the next refresh.
+
 It reads PR state with the `gh` CLI, so `gh` must be installed and signed in.
-
-## Requirements
-
-1. **Claude Code** in a terminal or the desktop app, in a build that supports mods. The band shows on those two only.
-2. **GitHub CLI (`gh`)**, installed and on your `PATH`. The mod tracks a PR when `gh pr create` runs, and reads its state with `gh pr view`. It does not work without `gh`.
-   - macOS: `brew install gh`
-   - Windows: `winget install --id GitHub.cli`
-   - Linux and other systems: see <https://cli.github.com>
-3. **A `gh` login** that can read the repos you open PRs in. Check with `gh auth status`. If you are not signed in, run `gh auth login`. For a GitHub Enterprise Server host, run `gh auth login --hostname <host>`.
-4. **PR links in the session.** The mod finds a PR when a command names it, a `gh pr` command prints it, or you write its link. A PR that was never named in the session, and a `gh pr view 12` with no `--repo`, are not found.
 
 ## Use
 
@@ -50,12 +60,12 @@ It reads PR state with the `gh` CLI, so `gh` must be installed and signed in.
 - The `Author:` filter shows only **your** PRs by default (the login `gh` is signed in as). Press `everyone` to include PRs others wrote. `/prs` goes back to mine.
 - The defaults are `Author: mine`, `Show: open` and `Needs: any`. They apply when the band first shows and each time you type `/prs`.
 - `dismiss merged (N)` removes every merged PR from the band at once. `/prs` brings them back.
-- A PR whose CI fails has a `fix CI` button. It sends `/<skill> <PR link>` to Claude, so your own skill runs on that PR. Set the skill name once: open `/plugin`, pick `session-prs`, and fill in `Fix-CI skill` (for example `ci-fix`). Until it is set, the button tells you how.
-- An open or draft PR has a `review` button. It runs each of your review skills on that PR, one after the other, sending `/<skill> <PR link>` for each. Set them once: open `/plugin`, pick `session-prs`, and fill in `Review skills`, separated by commas (for example `code-review, my-plugin:security-review`). Until it is set, the button tells you how.
+- A PR whose CI fails has a `fix CI` button. It sends `/<skill> <PR link>` to this session as if you typed it, so you see the prompt and Claude's reply here. If Claude is busy, it waits its turn. Your own skill runs on that PR. Set the skill name once: open `/plugin`, pick `session-prs`, and fill in `Fix-CI skill` (for example `ci-fix`). Until it is set, the button tells you how.
+- An open or draft PR has a `review` button. It sends each of your review skills to this session as if you typed it, one after the other: `/<skill> <PR link>`. Set them once: open `/plugin`, pick `session-prs`, and fill in `Review skills`, separated by commas (for example `code-review, my-plugin:security-review`). Until it is set, the button tells you how.
 - Every row has a `copy` button that puts the PR link on your clipboard.
 - Every row has a `dismiss` button that removes it from the band. It does not change the PR on GitHub.
 - `/prs hide` hides it. While hidden and PRs are tracked, one colored line (`▸ Session PRs  ● 2 open  ✔ 1 merged  click here or type /prs to expand`) shows where the band was. Click it to expand.
-- The band also has `hide` and `refresh` buttons at the top left.
+- The band also has `hide` and `refresh` buttons at the top left. `refresh` reads every open PR again and says so ("Refreshed 3 PR(s) at 14:05."). If `gh` cannot read a PR, a red line says which one and why, and the numbers shown may be old.
 - The buttons are Material Design icons in colored pills: eye = review (blue), wrench = fix CI (amber), copy = copy (teal), close = dismiss (red), chevron = hide (gray), refresh (green). They come from the Nerd Fonts set, so the terminal needs a [Nerd Font](https://www.nerdfonts.com) (Ghostty has one built in). If you see empty boxes, open `/plugin`, pick `session-prs`, and set `Button style` to `words`. Each column is as wide as its widest cell, so the table takes only the space it needs. In a narrower window the gaps tighten, then long text wraps inside its column, and under about 80 columns (110 with words) each PR takes two lines.
 
 ## License

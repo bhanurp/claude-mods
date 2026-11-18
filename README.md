@@ -18,6 +18,10 @@ claude plugin install session-prs --marketplace bhanurp/claude-mods
 
 Answer `y` to add the marketplace, then pick a scope.
 
+## Prerequisites
+
+Each mod lists its own. For `session-prs`: Claude Code with mods, and the GitHub CLI (`gh`) signed in. A Nerd Font and a terminal with link support are optional. See [its README](session-prs/README.md#prerequisites).
+
 ## Mods
 
 | Mod | What it does |
