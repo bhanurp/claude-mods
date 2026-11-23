@@ -23,7 +23,8 @@ type On = Parameters<Parameters<typeof test>[2]>[1]
 
 // What sits beneath the mod: one open PR with failing CI, and the commands the
 // engine lists. Records what the mod asks the engine to run or to say.
-const engine = (on: On, listed: string[]) => {
+const engine = (on: On, listed: string[], tab: 'found' | 'none' | 'off' = 'off') => {
+  const procs: string[][] = []
   const ran: { command: string; args: string }[] = []
   const sent: string[] = []
   const toasts: string[] = []
@@ -49,6 +50,15 @@ const engine = (on: On, listed: string[]) => {
   })
   on('process.run', (_, e) => {
     const argv = e.argv as string[]
+    if (tab !== 'off') {
+      procs.push(argv)
+      if (argv[0] === 'uname') return { value: { exitCode: 0, stdout: 'Darwin\n', stderr: '' } }
+      if (argv[0] === 'pgrep') {
+        return { value: { exitCode: argv[2] === 'Google Chrome' ? 0 : 1, stdout: '', stderr: '' } }
+      }
+      if (argv[0] === 'osascript') return { value: { exitCode: 0, stdout: `${tab}\n`, stderr: '' } }
+      if (argv[0] === 'open') return { value: { exitCode: 0, stdout: '', stderr: '' } }
+    }
     if (argv.includes('user')) return { value: { exitCode: 0, stdout: 'me\n', stderr: '' } }
     if (argv.includes('graphql')) {
       return { value: { exitCode: 0, stdout: '{"data":{}}', stderr: '' } }
@@ -64,7 +74,7 @@ const engine = (on: On, listed: string[]) => {
     }
     return { value: { exitCode: 0, stdout: JSON.stringify(view), stderr: '' } }
   })
-  return { ran, sent, toasts }
+  return { ran, sent, toasts, procs }
 }
 
 test('a listed skill runs as a slash command with the PR link', { options: OPTIONS }, async ($, on) => {
@@ -98,5 +108,34 @@ test('a skill the engine does not list is asked of Claude in words', { options: 
   await ui.press({ key: `fix-${PR}` })
   expect(ran).toEqual([])
   expect(sent).toEqual([`Use the auto-fix skill on this pull request: ${PR}`])
+  await ui.unmount()
+})
+
+test('a click on the PR number switches to an open tab', async ($, on) => {
+  const { procs, toasts } = engine(on, [], 'found')
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: 'Bash', command: `gh pr view ${PR}` })
+  const ui = await $.ui.mount(BAND)
+  await $.command.run({ command: 'prs', args: '' })
+
+  await ui.press({ key: 'open-2' })
+  const script = procs.find(a => a[0] === 'osascript')
+  expect(script?.[3]).toBe(PR)
+  expect(script?.[2]).toContain('application "Google Chrome"')
+  expect(procs.some(a => a[0] === 'open')).toBe(false)
+  expect(toasts).toContain('Switched to the open tab.')
+  await ui.unmount()
+})
+
+test('a click opens a new tab when no tab shows the page', async ($, on) => {
+  const { procs, toasts } = engine(on, [], 'none')
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: 'Bash', command: `gh pr view ${PR}` })
+  const ui = await $.ui.mount(BAND)
+  await $.command.run({ command: 'prs', args: '' })
+
+  await ui.press({ key: 'open-2' })
+  expect(procs.find(a => a[0] === 'open')).toEqual(['open', PR])
+  expect(toasts).toContain('Opened in a new tab.')
   await ui.unmount()
 })

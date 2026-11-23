@@ -1,6 +1,6 @@
 {
   "name": "session-prs",
-  "version": "0.2.5",
+  "version": "0.3.0",
   "license": "MIT",
   "description": "Band above the prompt that tracks the PRs your session used, with status, CI, review and comments, and buttons to review, fix CI, copy and dismiss.",
   "types": "./types/index.d.ts",
@@ -28,6 +28,12 @@
       "title": "Clickable links",
       "description": "auto (default) makes the repo, PR number, status and CI clickable only in terminals that support links (Ghostty, iTerm2, WezTerm, VS Code, kitty and others). Other terminals, such as macOS Terminal, would print each full URL under the text, so auto draws plain text there. Set on or off to force it.",
       "default": "auto"
+    },
+    "reuseTabs": {
+      "type": "string",
+      "title": "Reuse browser tabs",
+      "description": "on (default) makes a click on a PR link, on a Mac, switch to a tab that already shows that page in Chrome, Brave, Edge, Chromium or Safari, and open a new tab if there is none. The first click asks macOS for permission to control the browser. off uses the terminal's own links.",
+      "default": "on"
     }
   }
 }

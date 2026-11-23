@@ -182,6 +182,79 @@ const hasLinks = async ($: EngineInterface, mode: string): Promise<boolean> => {
   )
 }
 
+// Reuse a browser tab (macOS). A click looks for a tab on the same URL in the
+// browsers that are running, brings it to the front, and else opens a new tab.
+// Arc and Firefox have no tab scripting, so they get a new tab from `open`.
+const BROWSERS = [
+  { app: 'Google Chrome', safari: false },
+  { app: 'Brave Browser', safari: false },
+  { app: 'Microsoft Edge', safari: false },
+  { app: 'Chromium', safari: false },
+  { app: 'Safari', safari: true },
+]
+
+// The same page, with or without a trailing slash, query or fragment.
+const tabScript = (app: string, safari: boolean): string => `
+on run argv
+  set target to item 1 of argv
+  tell application "${app}"
+    repeat with w in windows
+      set i to 0
+      repeat with t in tabs of w
+        set i to i + 1
+        set u to URL of t
+        if u is target or (u starts with (target & "/") and (length of u) is ((length of target) + 1)) or u starts with (target & "#") or u starts with (target & "?") then
+          ${safari ? 'set current tab of w to t' : 'set active tab index of w to i'}
+          set index of w to 1
+          activate
+          return "found"
+        end if
+      end repeat
+    end repeat
+  end tell
+  return "none"
+end run`
+
+let isMacCache: Promise<boolean> | undefined
+const isMac = ($: Api): Promise<boolean> => {
+  isMacCache ??= $.process
+    .run(['uname'], { timeoutMs: 5_000 })
+    .then(out => out.stdout.trim() === 'Darwin')
+    .catch(() => false)
+  return isMacCache
+}
+
+const isRunning = async ($: Api, app: string): Promise<boolean> => {
+  try {
+    return (await $.process.run(['pgrep', '-x', app], { timeoutMs: 5_000 })).exitCode === 0
+  } catch {
+    return false
+  }
+}
+
+// 'focused' when a tab was found, 'opened' for a new tab, 'failed' otherwise.
+const openTab = async ($: Api, url: string): Promise<'focused' | 'opened' | 'failed'> => {
+  for (const { app, safari } of BROWSERS) {
+    if (!(await isRunning($, app))) continue
+    try {
+      // Times out at 15 s: the first run asks macOS for permission to control the browser.
+      const out = await $.process.run(['osascript', '-e', tabScript(app, safari), url], {
+        timeoutMs: 15_000,
+      })
+      if (out.exitCode === 0 && out.stdout.trim() === 'found') return 'focused'
+    } catch {
+      // No permission or no answer: try the next browser, then a new tab.
+    }
+  }
+  try {
+    return (await $.process.run(['open', url], { timeoutMs: 10_000 })).exitCode === 0
+      ? 'opened'
+      : 'failed'
+  } catch {
+    return 'failed'
+  }
+}
+
 // Cells in a string, counting a glyph once (a Nerd Font icon is two UTF-16 units).
 const cells = (text: string): number => [...text].length
 
@@ -652,6 +725,8 @@ export const register: Register = (on, options) => {
   const ACTIONS_W = slotsWidth(SLOT)
   // auto (default): links where the terminal draws them. on / off to force.
   const linkMode = String(options.links ?? 'auto').trim().toLowerCase()
+  // on (default): on a Mac, a click on a PR link reuses an open browser tab. off: terminal links.
+  const tabMode = String(options.reuseTabs ?? 'on').trim().toLowerCase()
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -734,9 +809,35 @@ export const register: Register = (on, options) => {
 
     const { Box, Text, Link, Button } = $.ui.resolve(e)
     const linksOn = await hasLinks($, linkMode)
-    // A link where the terminal draws it, else the text alone.
-    const link = (href: string, node: RenderChildren) =>
-      linksOn ? <Link href={href}>{node}</Link> : node
+    // On a Mac a click reuses the browser tab on that URL, else opens a new one.
+    const tabsOn = tabMode !== 'off' && linkMode !== 'off' && (await isMac($))
+    let linkNo = 0
+    // A clickable tab where it works, else a terminal link where the terminal
+    // draws it, else the text alone.
+    const link = (href: string, node: RenderChildren) => {
+      if (tabsOn) {
+        linkNo += 1
+        return (
+          <Button
+            key={`open-${linkNo}`}
+            plain
+            onPress={async () => {
+              const result = await openTab($, href)
+              await $.ui.toast(
+                result === 'focused'
+                  ? 'Switched to the open tab.'
+                  : result === 'opened'
+                    ? 'Opened in a new tab.'
+                    : 'Could not open the browser.',
+              )
+            }}
+          >
+            {node}
+          </Button>
+        )
+      }
+      return linksOn ? <Link href={href}>{node}</Link> : node
+    }
     const all = await read($, prs)
     const away = await read($, dismissed)
     const notAway = all.filter(p => !away.includes(p.url))
