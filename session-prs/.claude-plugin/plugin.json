@@ -1,6 +1,6 @@
 {
   "name": "session-prs",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "license": "MIT",
   "description": "Band above the prompt that tracks the PRs your session used, with status, CI, review and comments, and buttons to review, fix CI, copy and dismiss.",
   "types": "./types/index.d.ts",
@@ -32,7 +32,7 @@
     "reuseTabs": {
       "type": "string",
       "title": "Reuse browser tabs",
-      "description": "on (default) makes a click on a PR link, on a Mac, switch to a tab that already shows that page in Chrome, Brave, Edge, Chromium or Safari, and open a new tab if there is none. The first click asks macOS for permission to control the browser. off uses the terminal's own links.",
+      "description": "on (default) makes a click on a PR link switch to a tab that already shows that page in Chrome, Brave, Edge, Chromium or Safari, and open a new tab if there is none. On a Mac the first click asks for permission to control the browser. Linux opens a new tab. Windows uses the terminal's own links. off uses the terminal's own links everywhere.",
       "default": "on"
     }
   }

@@ -30,6 +30,7 @@ const engine = (on: On, listed: string[], tab: 'found' | 'none' | 'off' = 'off')
   const toasts: string[] = []
   on('command.register', () => ({ value: { command: 'prs' } }))
   on('env.get', () => ({ value: 'ghostty' }))
+  on('session.info', () => ({ value: { platform: 'macos', isHosted: false } }))
   on('clock.every', () => ({ value: () => {} }))
   on('command.list', () => ({
     value: listed.map(name => ({ name, description: '', source: 'user' })),
@@ -137,5 +138,45 @@ test('a click opens a new tab when no tab shows the page', async ($, on) => {
   await ui.press({ key: 'open-2' })
   expect(procs.find(a => a[0] === 'open')).toEqual(['open', PR])
   expect(toasts).toContain('Opened in a new tab.')
+  await ui.unmount()
+})
+
+test('a resumed session shows its earlier PRs without /prs', async ($, on) => {
+  engine(on, [])
+  on('session.messages', () => ({
+    value: [
+      {
+        role: 'assistant',
+        text: '',
+        toolUses: [
+          { tool: 'Bash', tool_use_id: 't1', input: { command: `gh pr view ${PR}` }, text: '' },
+        ],
+      },
+    ],
+  }))
+  on('agent.list', () => ({ value: [] }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await new Promise(done => setTimeout(done, 50))
+  const ui = await $.ui.mount(BAND)
+  expect(await ui.find({ type: 'Text', text: /#5/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('PRs from before a compaction come back from the store', async ($, on) => {
+  engine(on, [])
+  const written: unknown[] = []
+  on('session.id', () => ({ value: 's1' }))
+  on('store.get', () => ({ value: { s1: { urls: [PR], away: [] }, s2: { urls: [], away: [] } } }))
+  on('store.set', (_, e) => {
+    written.push(e.value)
+    return { value: undefined }
+  })
+  on('session.messages', () => ({ value: [] }))
+  on('agent.list', () => ({ value: [] }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await new Promise(done => setTimeout(done, 50))
+  const ui = await $.ui.mount(BAND)
+  expect(await ui.find({ type: 'Text', text: /#5/ })).toBeDefined()
+  expect(written.length).toBeGreaterThan(0)
   await ui.unmount()
 })

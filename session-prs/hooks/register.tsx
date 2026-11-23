@@ -182,7 +182,7 @@ const hasLinks = async ($: EngineInterface, mode: string): Promise<boolean> => {
   )
 }
 
-// Reuse a browser tab (macOS). A click looks for a tab on the same URL in the
+// Reuse a browser tab. A click looks for a tab on the same URL in the
 // browsers that are running, brings it to the front, and else opens a new tab.
 // Arc and Firefox have no tab scripting, so they get a new tab from `open`.
 const BROWSERS = [
@@ -193,18 +193,18 @@ const BROWSERS = [
   { app: 'Safari', safari: true },
 ]
 
-// The same page, with or without a trailing slash, query or fragment.
+// The same page, with or without a trailing slash, query or fragment. One
+// request per window for all its tab URLs: a request per tab is 4 times slower.
 const tabScript = (app: string, safari: boolean): string => `
 on run argv
   set target to item 1 of argv
   tell application "${app}"
     repeat with w in windows
-      set i to 0
-      repeat with t in tabs of w
-        set i to i + 1
-        set u to URL of t
+      set urls to URL of every tab of w
+      repeat with i from 1 to count of urls
+        set u to item i of urls
         if u is target or (u starts with (target & "/") and (length of u) is ((length of target) + 1)) or u starts with (target & "#") or u starts with (target & "?") then
-          ${safari ? 'set current tab of w to t' : 'set active tab index of w to i'}
+          ${safari ? 'set current tab of w to tab i of w' : 'set active tab index of w to i'}
           set index of w to 1
           activate
           return "found"
@@ -215,15 +215,6 @@ on run argv
   return "none"
 end run`
 
-let isMacCache: Promise<boolean> | undefined
-const isMac = ($: Api): Promise<boolean> => {
-  isMacCache ??= $.process
-    .run(['uname'], { timeoutMs: 5_000 })
-    .then(out => out.stdout.trim() === 'Darwin')
-    .catch(() => false)
-  return isMacCache
-}
-
 const isRunning = async ($: Api, app: string): Promise<boolean> => {
   try {
     return (await $.process.run(['pgrep', '-x', app], { timeoutMs: 5_000 })).exitCode === 0
@@ -232,24 +223,41 @@ const isRunning = async ($: Api, app: string): Promise<boolean> => {
   }
 }
 
+// Where the engine runs, from the engine's own answer.
+const platformOf = async ($: Api): Promise<string> => {
+  try {
+    return (await $.session.info()).platform ?? 'unknown'
+  } catch {
+    return 'unknown'
+  }
+}
+
 // 'focused' when a tab was found, 'opened' for a new tab, 'failed' otherwise.
-const openTab = async ($: Api, url: string): Promise<'focused' | 'opened' | 'failed'> => {
-  for (const { app, safari } of BROWSERS) {
-    if (!(await isRunning($, app))) continue
-    try {
-      // Times out at 15 s: the first run asks macOS for permission to control the browser.
-      const out = await $.process.run(['osascript', '-e', tabScript(app, safari), url], {
-        timeoutMs: 15_000,
-      })
-      if (out.exitCode === 0 && out.stdout.trim() === 'found') return 'focused'
-    } catch {
-      // No permission or no answer: try the next browser, then a new tab.
+// macOS searches the running browsers' tabs, then runs `open`. Linux and WSL
+// run `xdg-open`, which cannot search tabs.
+const openTab = async (
+  $: Api,
+  platform: string,
+  url: string,
+): Promise<'focused' | 'opened' | 'failed'> => {
+  if (platform === 'macos') {
+    for (const { app, safari } of BROWSERS) {
+      if (!(await isRunning($, app))) continue
+      try {
+        // Times out at 15 s: the first run asks macOS for permission to control the browser.
+        const out = await $.process.run(['osascript', '-e', tabScript(app, safari), url], {
+          timeoutMs: 15_000,
+        })
+        if (out.exitCode === 0 && out.stdout.trim() === 'found') return 'focused'
+      } catch {
+        // No permission or no answer: try the next browser, then a new tab.
+      }
     }
   }
   try {
-    return (await $.process.run(['open', url], { timeoutMs: 10_000 })).exitCode === 0
-      ? 'opened'
-      : 'failed'
+    const opener = platform === 'macos' ? 'open' : 'xdg-open'
+    const out = await $.process.run([opener, url], { timeoutMs: 10_000 })
+    return out.exitCode === 0 ? 'opened' : 'failed'
   } catch {
     return 'failed'
   }
@@ -554,6 +562,7 @@ const refreshAll = async ($: Api, isManual = false): Promise<void> => {
     const time = `${pad(now.getHours())}:${pad(now.getMinutes())}`
     await update($, notice, () => `Refreshed ${live.length} PR(s) at ${time}.`)
   }
+  await saveTracked($)
 }
 
 // Status is `unknown` until the first `gh pr view` answers.
@@ -675,6 +684,7 @@ const addPrs = async ($: Api, found: Pr[]): Promise<number> => {
     added = fresh.length
     return [...all, ...fresh].slice(-MAX_PRS)
   })
+  if (added > 0) await saveTracked($)
   return added
 }
 
@@ -697,6 +707,60 @@ const backfill = async ($: Api): Promise<number> => {
     // An agent's messages cannot be read: skip the rest.
   }
   return addPrs($, found)
+}
+
+// The session's PRs outlive a restart. The engine hands a resumed session only
+// the messages after its last compaction, so older PRs are kept in the plugin's
+// store, by session id. At most 30 sessions are kept.
+const SAVED_KEY = 'sessions'
+const MAX_SAVED = 30
+type Saved = { urls: string[]; away: string[] }
+
+const readSaved = async ($: Api): Promise<Record<string, Saved>> => {
+  try {
+    const raw = await $.store.get(SAVED_KEY)
+    return raw !== null && typeof raw === 'object' ? (raw as Record<string, Saved>) : {}
+  } catch {
+    return {}
+  }
+}
+
+const saveTracked = async ($: Api): Promise<void> => {
+  try {
+    const id = await $.session.id()
+    const all = await readSaved($)
+    delete all[id]
+    all[id] = {
+      urls: (await read($, prs)).map(p => p.url),
+      away: await read($, dismissed),
+    }
+    for (const old of Object.keys(all).slice(0, Math.max(0, Object.keys(all).length - MAX_SAVED))) {
+      delete all[old]
+    }
+    await $.store.set(SAVED_KEY, all)
+  } catch {
+    // The store cannot be written: the PRs are still tracked for this run.
+  }
+}
+
+// Bring back what an earlier run of this session tracked. Returns how many.
+const loadTracked = async ($: Api): Promise<number> => {
+  try {
+    const saved = (await readSaved($))[await $.session.id()]
+    if (saved === undefined) return 0
+    const found: Pr[] = []
+    for (const url of saved.urls) {
+      const m = PR_PARTS.exec(url)
+      if (m !== null && OK_URL.test(url)) {
+        found.push(mkPr(m[1] ?? '', `${m[2] ?? ''}/${m[3] ?? ''}`, Number(m[4])))
+      }
+    }
+    const added = await addPrs($, found)
+    await update($, dismissed, d => [...new Set([...d, ...saved.away])])
+    return added
+  } catch {
+    return 0
+  }
 }
 
 // Skill names from a setting: a list, or one string split at commas and spaces.
@@ -733,10 +797,25 @@ export const register: Register = (on, options) => {
       name: 'prs',
       description: 'Show PRs created in this session, with status',
     })
+    // A resumed session starts with no PRs and a hidden band: read its
+    // transcript, and show the band when it holds PRs. The transcript may not be
+    // loaded at the first read, so read it again on the first tick.
+    const restore = async () => {
+      const n = (await loadTracked($)) + (await backfill($))
+      if (n > 0) {
+        await update($, isShown, () => true)
+        void refreshAll($)
+      }
+    }
+    let isFirstTick = true
     $.clock.every(REFRESH_MS, () => {
+      if (isFirstTick) {
+        isFirstTick = false
+        void restore()
+      }
       void refreshAll($)
     })
-    void backfill($)
+    void restore()
 
     return next(e)
   })
@@ -746,6 +825,21 @@ export const register: Register = (on, options) => {
     if (e.args.trim() === 'hide') {
       await update($, isShown, () => false)
       return { text: 'PR band hidden. Type /prs to show it.' }
+    }
+    // /prs scan: also read what Claude wrote. /prs <links>: add those PRs.
+    const arg = e.args.trim()
+    let extra = 0
+    if (arg === 'scan') {
+      const host = await hostOf($)
+      const found: Pr[] = []
+      try {
+        for (const m of await $.session.messages()) found.push(...findPrs(m.text, host))
+      } catch {
+        // No transcript to read.
+      }
+      extra = await addPrs($, found)
+    } else if (arg !== '') {
+      extra = await addPrs($, findPrs(arg, await hostOf($)))
     }
     await update($, isShown, () => true)
     await update($, dismissed, () => [])
@@ -759,7 +853,7 @@ export const register: Register = (on, options) => {
 
     return {
       text: `PR band shown. ${total} PR${total === 1 ? '' : 's'} tracked` +
-        (added > 0 ? ` (${added} found in earlier messages).` : '.'),
+        (added + extra > 0 ? ` (${added + extra} found in messages).` : '.'),
     }
   })
 
@@ -809,8 +903,10 @@ export const register: Register = (on, options) => {
 
     const { Box, Text, Link, Button } = $.ui.resolve(e)
     const linksOn = await hasLinks($, linkMode)
-    // On a Mac a click reuses the browser tab on that URL, else opens a new one.
-    const tabsOn = tabMode !== 'off' && linkMode !== 'off' && (await isMac($))
+    // A click reuses the browser tab on that URL, else opens a new one.
+    const platform = await platformOf($)
+    const tabsOn =
+      tabMode !== 'off' && linkMode !== 'off' && ['macos', 'linux', 'wsl'].includes(platform)
     let linkNo = 0
     // A clickable tab where it works, else a terminal link where the terminal
     // draws it, else the text alone.
@@ -822,7 +918,7 @@ export const register: Register = (on, options) => {
             key={`open-${linkNo}`}
             plain
             onPress={async () => {
-              const result = await openTab($, href)
+              const result = await openTab($, platform, href)
               await $.ui.toast(
                 result === 'focused'
                   ? 'Switched to the open tab.'
@@ -1105,14 +1201,15 @@ export const register: Register = (on, options) => {
             <Button
               key="dismiss-merged"
               plain
-              onPress={() =>
-                update($, dismissed, d => [
+              onPress={async () => {
+                await update($, dismissed, d => [
                   ...d,
                   ...all
                     .filter(p => p.status === 'merged' && !d.includes(p.url))
                     .map(p => p.url),
                 ])
-              }
+                await saveTracked($)
+              }}
             >
               {icon('dismiss', `${LABEL.dismiss} merged ${mergedCount}`)}
             </Button>
@@ -1323,7 +1420,10 @@ export const register: Register = (on, options) => {
                     <Button
                       key={`dismiss-${pr.url}`}
                       plain
-                      onPress={() => update($, dismissed, d => [...d, pr.url])}
+                      onPress={async () => {
+                        await update($, dismissed, d => [...d, pr.url])
+                        await saveTracked($)
+                      }}
                     >
                       {icon('dismiss')}
                     </Button>,
